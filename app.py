@@ -1,166 +1,211 @@
-# Import libraries
 import streamlit as st
 import pandas as pd
+import numpy as np
+import calendar
 import seaborn as sns
 import matplotlib.pyplot as plt
-from datetime import datetime
-import unicodedata
-import re
+from scipy.stats import linregress
+import io
 
-# --- Streamlit page setup ---
-st.set_page_config(page_title="Cleaning Audit Insights", layout="wide")
-st.title("Data-Driven Cleaning Audit Insights")
+# --- PAGE CONFIG ---
+st.set_page_config(page_title="Cleaning Audit Dashboard", layout="wide")
+st.title("🧼 Cleaning Audit Dashboard")
 
-# --- Introduction ---
-st.header("Understanding Our Operational Performance Through Data")
-st.markdown("""
-This dashboard provides a clear and visual overview of our cleaning audit performance over the last three months. By analyzing this data, we can identify key trends, areas of strength, and opportunities for improvement, ultimately leading to cost savings and enhanced efficiency.
-""")
+# --- FILE UPLOAD ---
+uploaded_file = st.file_uploader("Upload the Excel file with multiple monthly sheets", type=["xlsx"])
 
-# --- Sidebar: File uploader ---
-st.sidebar.header("Upload Audit Data")
-uploaded_file = st.sidebar.file_uploader("Upload your Excel or CSV file", type=["xlsx", "csv"])
+if uploaded_file:
+    xls = pd.ExcelFile(uploaded_file)
+    sheet_names = xls.sheet_names
 
-# --- Function: Standardize column names ---
-def standardize_column_names(df):
-    df.columns = [
-        re.sub(r'\W+', '_',
-               unicodedata.normalize('NFKD', col)
-               .encode('ascii', 'ignore')
-               .decode('utf-8')
-               .strip()
-               .lower()
-        )
-        for col in df.columns
-    ]
-    return df
+    @st.cache_data
+    def load_clean_sheet(file, sheet_name):
+        df = pd.read_excel(file, sheet_name=sheet_name)
+        df.columns = df.columns.str.strip().str.replace(' +', ' ', regex=True)
+        df.columns = df.columns.str.replace('Questionarie Result', 'Questionnaire Result', regex=False)
 
-# --- Function: Rename common variations ---
-def rename_columns(df):
-    col_map = {
-        'date_completed': ['date_completed', 'completed_date', 'data_finalizada'],
-        'score': ['score', 'pontuacao', 'nota'],
-        'questionarie_result': ['questionarie_result', 'resultado_questionario', 'result'],
-        'site': ['site', 'location', 'local']
-    }
-    for standard_name, aliases in col_map.items():
-        for alias in aliases:
-            if alias in df.columns:
-                df.rename(columns={alias: standard_name}, inplace=True)
-                break
-    return df
-
-# --- Function: Load and merge data ---
-def load_data(file):
-    try:
-        if file.name.endswith('.xlsx'):
-            sheets = {
-                'Jan': pd.read_excel(file, sheet_name='January 25', header=1),
-                'Feb': pd.read_excel(file, sheet_name='Feb 25', header=1),
-                'Mar': pd.read_excel(file, sheet_name='March 25', header=1)
-            }
-            df = pd.concat(sheets.values(), keys=sheets.keys(), names=['month'])
-            df.reset_index(inplace=True)
-        elif file.name.endswith('.csv'):
-            df = pd.read_csv(file)
-            df['month'] = 'Uploaded'
-        else:
-            st.error("Unsupported file format.")
-            return None
-
-        df = standardize_column_names(df)
-        df = rename_columns(df)
-
-        if 'date_completed' in df.columns:
-            df['date'] = pd.to_datetime(df['date_completed'], errors='coerce')
-        if 'score' in df.columns:
-            df['score'] = pd.to_numeric(df['score'], errors='coerce')
-        if 'questionarie_result' in df.columns:
-            df['questionarie_result'] = df['questionarie_result'].astype(str).str.strip()
+        expected_cols = [
+            'Date Completed', 'Site', 'Answered by',
+            'Percentage Received', 'Score', 'Questionnaire Result',
+            'Yes', 'No', 'N/A'
+        ]
+        if not set(expected_cols).issubset(df.columns):
+            raise ValueError(f"Missing columns in sheet '{sheet_name}'")
         return df
 
-    except Exception as e:
-        st.error(f"Error loading file: {e}")
-        return None
+    all_data = [load_clean_sheet(uploaded_file, sheet) for sheet in sheet_names]
+    df = pd.concat(all_data, ignore_index=True)
 
-# --- Load data if uploaded ---
-if uploaded_file:
-    df = load_data(uploaded_file)
+    # --- DATA CLEANING ---
+    df['Answered by'] = df['Answered by'].str.strip().str.title()
 
-    if df is not None:
-        # KPIs
-        st.header("📊 Overall Audit Performance")
-        col1, col2, col3 = st.columns(3)
+    # --- DATA ENRICHMENT ---
+    df['Date Completed'] = pd.to_datetime(df['Date Completed'], errors='coerce')
+    df['Month'] = df['Date Completed'].dt.month.apply(lambda x: calendar.month_abbr[x] if pd.notnull(x) else None)
+    df['Valid Questions'] = df['Yes'] + df['No']
+    df['Calculated Score'] = np.where(df['Valid Questions'] > 0, (df['Yes'] / df['Valid Questions']) * 100, np.nan)
 
-        with col1:
-            total_audits = len(df)
-            st.metric("Total Audits Conducted", total_audits)
+    def classify_score(score):
+        if pd.isnull(score): return 'Not Applicable'
+        elif score >= 80: return 'Approved'
+        elif score >= 60: return 'Acceptable'
+        else: return 'Critical'
 
-        with col2:
-            if 'questionarie_result' in df.columns:
-                pass_rate = (df['questionarie_result'].str.lower() == 'pass').mean() * 100
-                st.metric("Overall Pass Rate", f"{pass_rate:.2f}%")
-            else:
-                st.metric("Overall Pass Rate", "Data Missing")
+    df['Evaluation'] = df['Calculated Score'].apply(classify_score)
+    df['Evaluation Adjusted'] = df.apply(
+        lambda row: 'Not Enough Data' if row['Valid Questions'] <= 5 else classify_score(row['Calculated Score']),
+        axis=1
+    )
 
-        with col3:
-            if 'score' in df.columns:
-                avg_score = df['score'].mean()
-                st.metric("Average Score", f"{avg_score:.2f}")
-            else:
-                st.metric("Average Score", "Data Missing")
+    # --- FILTERS ---
+    st.sidebar.header("🔍 Filters")
+    months = sorted(df['Month'].dropna().unique())
+    sites = sorted(df['Site'].dropna().unique())
+    evaluations = df['Evaluation Adjusted'].dropna().unique().tolist()
+    answered_by = sorted(df['Answered by'].dropna().unique())
 
-        # Visuals
-        st.header("📈 Key Trends & Patterns")
+    selected_month = st.sidebar.selectbox("Select Month", options=['All'] + months)
+    selected_sites = st.sidebar.multiselect("Select Sites", options=sites, default=sites)
+    selected_eval = st.sidebar.multiselect("Select Evaluation", options=evaluations, default=evaluations)
+    selected_users = st.sidebar.multiselect("Select Answered By", options=answered_by, default=answered_by)
 
-        if 'questionarie_result' in df.columns and 'month' in df.columns:
-            st.subheader("Monthly Audit Performance")
-            fig, ax = plt.subplots(figsize=(10, 5))
-            sns.countplot(data=df, x='month', hue='questionarie_result', palette='viridis', ax=ax)
-            ax.set_title("Monthly Audit Performance")
-            st.pyplot(fig)
+    date_min = df['Date Completed'].min()
+    date_max = df['Date Completed'].max()
+    selected_date_range = st.sidebar.date_input("Select Date Range", [date_min, date_max], min_value=date_min, max_value=date_max)
 
-        if 'questionarie_result' in df.columns and 'site' in df.columns:
-            st.subheader("Top Sites with Most Failures")
-            fail_counts = df[df['questionarie_result'].str.lower() == 'failure']['site'].value_counts().head(5)
-            if not fail_counts.empty:
-                fig, ax = plt.subplots(figsize=(8, 4))
-                sns.barplot(x=fail_counts.values, y=fail_counts.index, palette='Reds_r', ax=ax)
-                ax.set_title("Top 5 Sites with Highest Failure Rates")
-                st.pyplot(fig)
-            else:
-                st.info("No failures recorded in the selected data.")
+    filtered_df = df.copy()
+    if selected_month != 'All':
+        filtered_df = filtered_df[filtered_df['Month'] == selected_month]
+    filtered_df = filtered_df[filtered_df['Site'].isin(selected_sites)]
+    filtered_df = filtered_df[filtered_df['Evaluation Adjusted'].isin(selected_eval)]
+    filtered_df = filtered_df[filtered_df['Answered by'].isin(selected_users)]
+    filtered_df = filtered_df[
+        (filtered_df['Date Completed'] >= pd.to_datetime(selected_date_range[0])) &
+        (filtered_df['Date Completed'] <= pd.to_datetime(selected_date_range[1]))
+    ]
 
-        if 'score' in df.columns:
-            st.subheader("Distribution of Audit Scores")
-            fig, ax = plt.subplots(figsize=(10, 5))
-            sns.histplot(data=df, x='score', kde=True, color='skyblue', ax=ax)
-            ax.set_title("Distribution of Audit Scores")
-            st.pyplot(fig)
+    # --- ANALYSIS TYPE ---
+    st.sidebar.header(":bar_chart: Analysis View")
+    view_option = st.sidebar.radio("Select View", options=['Top 10 Sites', 'Bottom 10 Sites', 'All Sites'])
 
-        # Optional Filter
-        st.subheader("🔍 Explore Data by Month (Optional)")
-        available_months = sorted(df['month'].dropna().unique())
-        selected_month = st.selectbox("Select Month:", ['All'] + list(available_months))
-        if selected_month != 'All':
-            filtered_df = df[df['month'] == selected_month]
-            st.write(f"**Details for {selected_month} Audits**")
-            st.dataframe(filtered_df[['site', 'questionarie_result', 'score']].style.highlight_max(subset=['score'], axis=0))
-        else:
-            st.write("**Overall Data Table**")
-            st.dataframe(df[['month', 'site', 'questionarie_result', 'score']].head())
+    # --- BAR PLOT WITH DYNAMIC COLOURS ---
+    st.subheader("📊 Average Score by Site")
+    avg_scores = filtered_df.groupby('Site')['Calculated Score'].mean().dropna()
 
-        # Conclusion
-        st.header("🎯 Conclusion: Embracing Data for a Brighter Future")
-        st.markdown("""
-        This initial exploration highlights the significant potential of data analysis to drive operational excellence within our company.
-        By moving towards a data-driven culture, we can make more informed decisions, optimize our resources, and ultimately deliver greater value.
-        """)
+    if view_option == 'Top 10 Sites':
+        avg_scores = avg_scores.sort_values(ascending=False).head(10)
+    elif view_option == 'Bottom 10 Sites':
+        avg_scores = avg_scores.sort_values().head(10)
     else:
-        st.warning("The file could not be processed. Please check its structure and try again.")
-else:
-    st.sidebar.info("Please upload a file to display the dashboard.")
+        avg_scores = avg_scores.sort_values()
 
-# Sidebar footer
-st.sidebar.markdown("---")
-st.sidebar.markdown("Developed for Cleaning Audit Analysis – compatible with Excel (.xlsx) and CSV (.csv) files.")
+    def score_to_color(score):
+        if score >= 80:
+            return '#2ca02c'  # green
+        elif score >= 60:
+            return '#ff7f0e'  # orange
+        else:
+            return '#d62728'  # red
+
+    colors = avg_scores.apply(score_to_color).values
+
+    fig1, ax1 = plt.subplots()
+    sns.barplot(x=avg_scores.values, y=avg_scores.index, palette=colors, ax=ax1)
+    ax1.axvline(80, color='green', linestyle='--', label='Approved (80%)')
+    ax1.axvline(60, color='red', linestyle='--', label='Critical (60%)')
+    ax1.set_xlabel("Average Score")
+    ax1.set_title("Site Score Distribution")
+    ax1.legend()
+    st.pyplot(fig1)
+
+    # --- HEATMAP ---
+    st.subheader(":fire: Heatmap of Monthly Scores")
+    top_bottom_sites = avg_scores.index.tolist()
+    df_heatmap = filtered_df[filtered_df['Site'].isin(top_bottom_sites)]
+    pivot_table = df_heatmap.pivot_table(values='Calculated Score', index='Site', columns='Month', aggfunc='mean')
+
+    fig2, ax2 = plt.subplots(figsize=(10, 6))
+    sns.heatmap(pivot_table, annot=True, fmt=".1f", cmap="RdYlGn_r", linewidths=.5, ax=ax2, vmin=0, vmax=100)
+    ax2.set_title("Heatmap: Monthly Score per Site")
+    st.pyplot(fig2)
+
+    # --- SCATTER WITH REGRESSION ---
+    st.subheader(":mag_right: % Received vs Calculated Score")
+    x = filtered_df['Percentage Received']
+    y = filtered_df['Calculated Score']
+
+    if len(x.dropna()) > 1 and len(y.dropna()) > 1:
+        slope, intercept, r_value, _, _ = linregress(x, y)
+        reg_line = slope * x + intercept
+
+        fig3, ax3 = plt.subplots()
+        sns.scatterplot(x=x, y=y, ax=ax3, s=60, alpha=0.6)
+        ax3.plot(x, reg_line, color='red', label=f'Trend (R²={r_value**2:.2f})')
+        ax3.axhline(80, color='green', linestyle='--')
+        ax3.axhline(60, color='orange', linestyle='--')
+        ax3.set_xlabel('Percentage Received')
+        ax3.set_ylabel('Calculated Score')
+        ax3.set_title('Relationship Between % Received and Score')
+        ax3.legend()
+        st.pyplot(fig3)
+    else:
+        st.warning("Not enough data to calculate linear regression.")
+
+# --- AUDITOR SITE COVERAGE WITH MONTH AND SITE FILTER + KPI ---
+st.subheader(":busts_in_silhouette: Auditor Site Coverage")
+
+# Select an auditor
+selected_auditor = st.selectbox("Select an Auditor", options=answered_by)
+
+# Filtered data for this auditor
+auditor_df = filtered_df[filtered_df['Answered by'] == selected_auditor]
+
+# Extra filters
+months_available = sorted(auditor_df['Month'].dropna().unique().tolist())
+sites_available = sorted(auditor_df['Site'].dropna().unique())
+
+selected_month_filter = st.selectbox("Optional: Filter by Month", options=['All'] + months_available)
+selected_site_filter = st.selectbox("Optional: Filter by Site", options=['All'] + sites_available)
+
+# Apply extra filters
+filtered_audit_df = auditor_df.copy()
+if selected_month_filter != 'All':
+    filtered_audit_df = filtered_audit_df[filtered_audit_df['Month'] == selected_month_filter]
+if selected_site_filter != 'All':
+    filtered_audit_df = filtered_audit_df[filtered_audit_df['Site'] == selected_site_filter]
+
+# KPI - total audits after filters
+total_audits_filtered = len(filtered_audit_df)
+st.markdown(f"### ✅ Total Audits: `{total_audits_filtered}`")
+
+# Audit frequency table
+audit_period = (
+    filtered_audit_df.groupby(['Site', 'Month'])
+    .size()
+    .reset_index(name='Audit Count')
+    .sort_values(by=['Audit Count'], ascending=False)
+)
+
+st.markdown(f"**Audit frequency by Site and Month – `{selected_auditor}`**")
+st.dataframe(audit_period)
+
+# Bar chart: audit counts by site
+site_counts = filtered_audit_df['Site'].value_counts()
+
+fig4, ax4 = plt.subplots(figsize=(10, max(5, len(site_counts) * 0.3)))
+sns.barplot(y=site_counts.index, x=site_counts.values, palette="Blues_d", ax=ax4)
+ax4.set_xlabel("Number of Audits")
+ax4.set_ylabel("Site")
+ax4.set_title(f"Sites audited by {selected_auditor}")
+plt.xticks(rotation=0)
+plt.tight_layout()
+st.pyplot(fig4)
+
+
+# --- DOWNLOAD CLEANED FILE ---
+st.download_button(
+    label="Download Processed CSV",
+    data=filtered_df.to_csv(index=False),
+    file_name="filtered_cleaned_audit.csv",
+    mime="text/csv"
+)

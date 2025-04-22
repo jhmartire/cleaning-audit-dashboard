@@ -6,213 +6,259 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from scipy.stats import linregress
 import base64
-import os
+import re
+import traceback
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Cleaning Audit Dashboard", layout="wide")
 
-# --- INSTRUCTIONS & FILE UPLOAD TAB ---
+# --- TABS ---
 tabs = st.tabs(["📘 Instructions & Upload", "📊 Scores & Heatmap", "🧑‍💼 Auditor Overview"])
 
-# --- INSTRUCTION AND FILE UPLOAD TAB ---
+# --- TAB 0: INSTRUÇÕES & UPLOAD ---
 with tabs[0]:
     st.title("🧼 Cleaning Audit Dashboard")
     st.markdown("### Upload the Excel file with multiple monthly sheets")
     uploaded_file = st.file_uploader("Upload your file here", type=["xlsx"])
-
-    with st.expander("📌 How to use this dashboard (click to expand)", expanded=False):
+    with st.expander("📌 How to use", expanded=False):
         st.markdown("""
-        ### Please follow the steps below to ensure correct file upload:
-        1. The Excel file must contain **monthly sheets** named like `January 25`, `February 25`, etc.
-        2. Each sheet must start from **cell A1** and have the correct columns:
-            - `Date Completed`, `Site`, `Answered by`, `Percentage Received`, `Score`, `Questionnaire Result`, `Yes`, `No`, `N/A`
-        3. Avoid uploading any sheets like **Summary** or unrelated tabs.
-        4. If you're unsure, download and use the example template provided below.
+        1. Cada aba deve ter colunas:  
+           `Date Completed, Site, Answered by, Percentage Received, Score, Questionnaire Result, Yes, No, N/A`  
+        2. Evite abas de resumo/extras.  
+        3. Baixe o template, se quiser:
         """)
-
         try:
-            st.image("img/example_sheet.png", caption="✅ Example of correct Excel sheet format", use_container_width=True)
-        except Exception as e:
-            st.warning(f"Image not found: {e}")
-
+            st.image("img/example_sheet.png", use_container_width=True)
+        except:
+            pass
         try:
             with open("audit_template.xlsx", "rb") as f:
                 b64 = base64.b64encode(f.read()).decode()
-                href = f'<a href="data:application/octet-stream;base64,{b64}" download="audit_template.xlsx">📥 Download Example Excel Template</a>'
-                st.markdown(href, unsafe_allow_html=True)
-        except Exception as e:
-            st.error(f"Template file not found: {e}")
+                st.markdown(
+                    f'<a href="data:application/octet-stream;base64,{b64}" '
+                    'download="audit_template.xlsx">📥 Download Template</a>',
+                    unsafe_allow_html=True
+                )
+        except:
+            pass
 
-# Only run analysis tabs if a file is uploaded
 if uploaded_file:
-    xls = pd.ExcelFile(uploaded_file)
-    sheet_names = xls.sheet_names
+    sheets = pd.ExcelFile(uploaded_file).sheet_names
 
     @st.cache_data
-    def load_clean_sheet(file, sheet_name):
-        df = pd.read_excel(file, sheet_name=sheet_name)
-        df.columns = df.columns.str.strip().str.replace(' +', ' ', regex=True)
-        df.columns = df.columns.str.replace('Questionarie Result', 'Questionnaire Result', regex=False)
-        expected_cols = ['Date Completed', 'Site', 'Answered by', 'Percentage Received', 'Score', 'Questionnaire Result', 'Yes', 'No', 'N/A']
-        if not set(expected_cols).issubset(df.columns):
-            raise ValueError(f"Missing columns in sheet '{sheet_name}'")
+    def load_clean_sheet(file, sh):
+        df = pd.read_excel(file, sheet_name=sh)
+        df.columns = (df.columns
+                        .str.strip()
+                        .str.replace(r'\s+', ' ', regex=True)
+                        .str.replace('Questionarie Result','Questionnaire Result'))
+        need = ['Date Completed','Site','Answered by','Percentage Received',
+                'Score','Questionnaire Result','Yes','No','N/A']
+        if not set(need).issubset(df.columns):
+            raise ValueError(f"Faltando colunas em '{sh}'")
         return df
 
     try:
-        all_data = [load_clean_sheet(uploaded_file, sheet) for sheet in sheet_names]
-        df = pd.concat(all_data, ignore_index=True)
+        df = pd.concat([load_clean_sheet(uploaded_file,sh) for sh in sheets], ignore_index=True)
 
+        # --- 1) NORMALIZAÇÃO DE SITE + FUZZY GROUPING ---
+        def normalize_name(name: str) -> str:
+            s = name.lower()
+            # ranges "xx-yy" -> maior dos dois
+            s = re.sub(r'(\d+)\s*-\s*(\d+)',
+                       lambda m: str(max(int(m.group(1)),int(m.group(2)))), s)
+            # street -> st
+            s = re.sub(r'\bstreet\b','st', s)
+            # “32st” ou “32 st” -> “32”
+            s = re.sub(r'(\d+)\s*st\b', r'\1', s)
+            # remove tokens de pouco valor
+            s = re.sub(r'\b(s|house|place|floor)\b','', s)
+            # deixa só alfanum e espaço
+            s = re.sub(r'[^a-z0-9\s]',' ', s)
+            return re.sub(r'\s+',' ', s).strip()
+
+        df['Site_norm'] = df['Site'].astype(str).apply(normalize_name)
+        df['token_key'] = df['Site_norm'].apply(lambda s: ' '.join(sorted(s.split())))
+
+        canon_map = {}
+        for key, grp in df.groupby('token_key'):
+            canon = grp['Site_norm'].mode()[0]
+            for v in grp['Site_norm'].unique():
+                canon_map[v] = canon
+
+        df['Site'] = df['Site_norm'].map(canon_map)
+        df.drop(columns=['Site_norm','token_key'], inplace=True)
+
+        # 1) garantir “st” após o número
+        def ensure_st_suffix(canonical: str) -> str:
+            parts = canonical.split()
+            if parts and parts[0].isdigit() and (len(parts)>1 and parts[1] != 'st'):
+                return f"{parts[0]} st {' '.join(parts[1:])}"
+            return canonical
+
+        df['Site'] = df['Site'].apply(ensure_st_suffix)
+
+        # 2) remover um “st” sobrando no final
+        df['Site'] = df['Site'] \
+            .str.replace(r'\bst$', '', regex=True) \
+            .str.strip()
+
+        # --- 3) CÁLCULOS PRINCIPAIS ---
         df['Answered by'] = df['Answered by'].str.strip().str.title()
         df['Date Completed'] = pd.to_datetime(df['Date Completed'], errors='coerce')
-        df['Month'] = df['Date Completed'].dt.month.apply(lambda x: calendar.month_abbr[int(x)] if pd.notnull(x) else None)
+        df['Month'] = df['Date Completed'].dt.month.apply(
+            lambda x: calendar.month_abbr[int(x)] if pd.notnull(x) else None
+        )
         df['Valid Questions'] = df['Yes'] + df['No']
-        df['Calculated Score'] = np.where(df['Valid Questions'] > 0, (df['Yes'] / df['Valid Questions']) * 100, np.nan)
+        df['Calculated Score'] = np.where(
+            df['Valid Questions']>0,
+            (df['Yes']/df['Valid Questions'])*100,
+            np.nan
+        )
 
-        def classify_score(score):
-            if pd.isnull(score): return 'Not Applicable'
-            elif score >= 80: return 'Approved'
-            elif score >= 60: return 'Acceptable'
-            else: return 'Critical'
+        # --- 4) CLASSIFICAÇÃO “Not Enough Data” ---
+        def classify_score(s):
+            if pd.isnull(s):   return 'Not Applicable'
+            if s>=80:          return 'Approved'
+            if s>=60:          return 'Acceptable'
+            return 'Critical'
 
-        df['Evaluation'] = df['Calculated Score'].apply(classify_score)
-        df['Evaluation Adjusted'] = df.apply(lambda row: 'Not Enough Data' if row['Valid Questions'] <= 5 else classify_score(row['Calculated Score']), axis=1)
+        df['Evaluation'] = df.apply(
+            lambda r: 'Not Enough Data'
+                      if r['Valid Questions']<=5
+                      else classify_score(r['Calculated Score']),
+            axis=1
+        )
 
+        # --- 5) SIDEBAR FILTROS ---
         st.sidebar.header(":bar_chart: Analysis View")
-        view_option = st.sidebar.radio("Select View", options=['Top 10 Sites', 'Bottom 10 Sites', 'All Sites'])
-
+        view = st.sidebar.radio("Select View",
+               ['Top 10 Sites','Bottom 10 Sites','All Sites'])
         st.sidebar.markdown("---")
         st.sidebar.header("🔍 Filters")
 
-        months = sorted(df['Month'].dropna().unique())
-        sites = sorted(df['Site'].dropna().unique())
-        evaluations = df['Evaluation Adjusted'].dropna().unique().tolist()
-        answered_by = sorted(df['Answered by'].dropna().unique())
-        date_min = df['Date Completed'].min()
-        date_max = df['Date Completed'].max()
+        months = ['All'] + sorted(df['Month'].dropna().unique().tolist())
+        sites  = sorted(df['Site'].dropna().unique())
+        evals  = sorted(df['Evaluation'].dropna().unique())
+        users  = sorted(df['Answered by'].dropna().unique())
+        dmin, dmax = df['Date Completed'].min(), df['Date Completed'].max()
 
-        with st.sidebar.expander("📅 Time Filters", expanded=True):
-            selected_month = st.selectbox("Select Month", options=['All'] + months)
-            selected_date_range = st.date_input("Select Date Range", [date_min, date_max], min_value=date_min, max_value=date_max)
+        sel_month = st.sidebar.selectbox("Month", months)
+        sel_range = st.sidebar.date_input("Date Range",
+                       [dmin,dmax], min_value=dmin, max_value=dmax)
+        sel_sites = st.sidebar.multiselect("Sites", sites, default=sites)
+        sel_evals = st.sidebar.multiselect("Evaluation", evals, default=evals)
+        sel_users = st.sidebar.multiselect("Answered by", users, default=users)
 
-        with st.sidebar.expander("📍 Site & Evaluation Filters", expanded=True):
-            selected_sites = st.multiselect("Select Sites", options=sites, default=sites)
-            selected_eval = st.multiselect("Select Evaluation", options=evaluations, default=evaluations)
+        filt = df.copy()
+        if sel_month!='All': 
+            filt = filt[filt['Month']==sel_month]
+        filt = filt[filt['Site'].isin(sel_sites)]
+        filt = filt[filt['Evaluation'].isin(sel_evals)]
+        filt = filt[filt['Answered by'].isin(sel_users)]
+        filt = filt[
+            (filt['Date Completed']>=pd.to_datetime(sel_range[0])) &
+            (filt['Date Completed']<=pd.to_datetime(sel_range[1]))
+        ]
 
-        with st.sidebar.expander("👤 Auditor Filters", expanded=True):
-            selected_users = st.multiselect("Select Answered By", options=answered_by, default=answered_by)
-
-        filtered_df = df.copy()
-        if selected_month != 'All':
-            filtered_df = filtered_df[filtered_df['Month'] == selected_month]
-        filtered_df = filtered_df[filtered_df['Site'].isin(selected_sites)]
-        filtered_df = filtered_df[filtered_df['Evaluation Adjusted'].isin(selected_eval)]
-        filtered_df = filtered_df[filtered_df['Answered by'].isin(selected_users)]
-        filtered_df = filtered_df[(filtered_df['Date Completed'] >= pd.to_datetime(selected_date_range[0])) & (filtered_df['Date Completed'] <= pd.to_datetime(selected_date_range[1]))]
-
+        # --- 6) TAB Scores & Heatmap ---
         with tabs[1]:
             st.subheader("📊 Average Score by Site")
-            avg_scores = filtered_df.groupby('Site')['Calculated Score'].mean().dropna()
-            if view_option == 'Top 10 Sites':
-                avg_scores = avg_scores.sort_values(ascending=False).head(10)
-            elif view_option == 'Bottom 10 Sites':
-                avg_scores = avg_scores.sort_values().head(10)
+            avg = filt.groupby('Site')['Calculated Score'].mean().dropna()
+            if view=='Top 10 Sites':
+                avg = avg.sort_values(ascending=False).head(10)
+            elif view=='Bottom 10 Sites':
+                avg = avg.sort_values().head(10)
             else:
-                avg_scores = avg_scores.sort_values()
+                avg = avg.sort_values()
 
-            def score_to_color(score):
-                if score >= 80: return '#2ca02c'
-                elif score >= 60: return '#ff7f0e'
-                else: return '#d62728'
+            df_bar = avg.reset_index().rename(columns={'Calculated Score':'Score'})
+            emap   = filt.set_index('Site')['Evaluation'].to_dict()
+            df_bar['Evaluation'] = df_bar['Site'].map(emap)
+            cmap   = {
+                'Approved':'#2ecc71','Acceptable':'#f1c40f',
+                'Critical':'#e74c3c','Not Enough Data':'#95a5a6'
+            }
+            df_bar['Color'] = df_bar['Evaluation'].map(cmap)
 
-            colors = avg_scores.apply(score_to_color).values
-            fig1, ax1 = plt.subplots()
-            sns.barplot(x=avg_scores.values, y=avg_scores.index, palette=colors, ax=ax1)
-            ax1.axvline(80, color='green', linestyle='--', label='Approved (80%)')
-            ax1.axvline(60, color='red', linestyle='--', label='Critical (60%)')
-            ax1.set_xlabel("Average Score")
-            ax1.set_title("Site Score Distribution")
+            fig1,ax1 = plt.subplots()
+            sns.barplot(
+                x=df_bar['Score'], y=df_bar['Site'],
+                palette=df_bar['Color'].tolist(), ax=ax1
+            )
+            ax1.axvline(80,color='green',linestyle='--',label='Approved (>=80%)')
+            ax1.axvline(60,color='red',linestyle='--',  label='Critical (<60%)')
+            ax1.set_xlabel("Average Score (%)")
             ax1.legend()
             st.pyplot(fig1)
 
-            st.subheader(":fire: Heatmap of Monthly Scores")
-            top_bottom_sites = avg_scores.index.tolist()
-            df_heatmap = filtered_df[filtered_df['Site'].isin(top_bottom_sites)]
-            pivot_table = df_heatmap.pivot_table(values='Calculated Score', index='Site', columns='Month', aggfunc='mean')
+            st.subheader("🔥 Heatmap of Monthly Scores")
+            overall = filt.groupby('Site')['Calculated Score'].mean().sort_values()
+            top10 = list(overall.tail(10).index)
+            bot10 = list(overall.head(10).index)
+            order = top10 + bot10
 
-            fig2, ax2 = plt.subplots(figsize=(10, 6))
-            sns.heatmap(pivot_table, annot=True, fmt=".1f", cmap="RdYlGn_r", linewidths=.5, ax=ax2, vmin=0, vmax=100)
+            hm = filt[filt['Site'].isin(order)]
+            pivot = hm.pivot_table(
+                'Calculated Score','Site','Month',aggfunc='mean'
+            )
+            months_ord = ['Jan','Feb','Mar','Apr','May','Jun',
+                          'Jul','Aug','Sep','Oct','Nov','Dec']
+            pivot = pivot.reindex(columns=[m for m in months_ord if m in pivot.columns],
+                                  index=order)
+
+            fig2,ax2 = plt.subplots(figsize=(10,6))
+            sns.heatmap(
+                pivot,annot=True,fmt='.1f',cmap='RdYlGn',
+                vmin=0,vmax=100,linewidths=0.5,
+                cbar_kws={'label':'Score (%)'}, ax=ax2
+            )
             ax2.set_title("Heatmap: Monthly Score per Site")
             st.pyplot(fig2)
 
-            st.subheader(":mag_right: % Received vs Calculated Score")
-            x = filtered_df['Percentage Received']
-            y = filtered_df['Calculated Score']
-
-            if len(x.dropna()) > 1 and len(y.dropna()) > 1:
-                slope, intercept, r_value, _, _ = linregress(x, y)
-                reg_line = slope * x + intercept
-                fig3, ax3 = plt.subplots()
-                sns.scatterplot(x=x, y=y, ax=ax3, s=60, alpha=0.6)
-                ax3.plot(x, reg_line, color='red', label=f'Trend (R²={r_value**2:.2f})')
-                ax3.axhline(80, color='green', linestyle='--')
-                ax3.axhline(60, color='orange', linestyle='--')
-                ax3.set_xlabel('Percentage Received')
-                ax3.set_ylabel('Calculated Score')
-                ax3.set_title('Relationship Between % Received and Score')
+            st.subheader("🔍 % Received vs Calculated Score")
+            sc = filt[filt['Calculated Score']<=100]
+            x,y = sc['Percentage Received'], sc['Calculated Score']
+            if x.notna().sum()>1 and y.notna().sum()>1:
+                s,i,r,_,_ = linregress(x,y)
+                rl = s*x + i
+                fig3,ax3 = plt.subplots()
+                sns.scatterplot(x=x,y=y,alpha=.6,s=60,ax=ax3)
+                ax3.plot(x,rl,color='red',label=f'R²={r**2:.2f}')
+                ax3.axhline(80,color='green',linestyle='--')
+                ax3.axhline(60,color='orange',linestyle='--')
                 ax3.legend()
                 st.pyplot(fig3)
             else:
-                st.warning("Not enough data to calculate linear regression.")
+                st.warning("Dados insuficientes para regressão")
 
+        # --- 7) TAB Auditor Overview ---
         with tabs[2]:
-            st.subheader(":busts_in_silhouette: Auditor Site Coverage")
-            selected_auditor = st.selectbox("Select an Auditor", options=answered_by)
-            auditor_df = filtered_df[filtered_df['Answered by'] == selected_auditor]
-
-            months_available = sorted(auditor_df['Month'].dropna().unique().tolist())
-            sites_available = sorted(auditor_df['Site'].dropna().unique())
-
-            selected_month_filter = st.selectbox("Optional: Filter by Month", options=['All'] + months_available)
-            selected_site_filter = st.selectbox("Optional: Filter by Site", options=['All'] + sites_available)
-
-            filtered_audit_df = auditor_df.copy()
-            if selected_month_filter != 'All':
-                filtered_audit_df = filtered_audit_df[filtered_audit_df['Month'] == selected_month_filter]
-            if selected_site_filter != 'All':
-                filtered_audit_df = filtered_audit_df[filtered_audit_df['Site'] == selected_site_filter]
-
-            total_audits_filtered = len(filtered_audit_df)
-            st.markdown(f"### ✅ Total Audits: `{total_audits_filtered}`")
-
-            audit_period = (
-                filtered_audit_df.groupby(['Site', 'Month'])
-                .size()
-                .reset_index(name='Audit Count')
-                .sort_values(by=['Audit Count'], ascending=False)
-            )
-            st.markdown(f"**Audit frequency by Site and Month – `{selected_auditor}`**")
-            st.dataframe(audit_period)
-
-            site_counts = filtered_audit_df['Site'].value_counts()
-            fig4, ax4 = plt.subplots(figsize=(10, max(5, len(site_counts) * 0.3)))
-            sns.barplot(y=site_counts.index, x=site_counts.values, palette="Blues_d", ax=ax4)
-            ax4.set_xlabel("Number of Audits")
-            ax4.set_ylabel("Site")
-            ax4.set_title(f"Sites audited by {selected_auditor}")
-            plt.xticks(rotation=0)
-            plt.tight_layout()
+            aud = st.selectbox("Answered by", users)
+            adf = filt[filt['Answered by']==aud]
+            st.markdown(f"### ✅ Total Audits: {len(adf)}")
+            freq = (adf.groupby(['Site','Month'])
+                      .size()
+                      .reset_index(name='Count')
+                      .sort_values('Count',ascending=False))
+            st.dataframe(freq)
+            cnts = adf['Site'].value_counts()
+            fig4,ax4 = plt.subplots(figsize=(10,max(5,len(cnts)*.3)))
+            sns.barplot(x=cnts.values,y=cnts.index,palette="Blues_d",ax=ax4)
+            ax4.set_xlabel("Audit Count"); ax4.set_ylabel("Site")
             st.pyplot(fig4)
 
-            st.download_button(
-                label="Download Processed CSV",
-                data=filtered_df.to_csv(index=False),
-                file_name="filtered_cleaned_audit.csv",
-                mime="text/csv"
-            )
+        # --- 8) DOWNLOAD CSV ---
+        st.download_button(
+            "📥 Download CSV",
+            data=filt.to_csv(index=False),
+            file_name="filtered.csv", mime="text/csv"
+        )
 
     except Exception as e:
-        with tabs[0]:
-            st.error("❌ An error occurred while loading the file. Please ensure it's in the correct format.")
+        st.error(f"❌ Error: {e}")
+        st.text(traceback.format_exc())
+
 else:
     with tabs[1]:
-        st.info("👆 Please upload an Excel file to begin.")
+        st.info("👆 Upload your Excel to begin.")

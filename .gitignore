@@ -8,3 +8,13 @@ venv/
 .DS_Store
 
 
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv-streamlit/
+.venv/
+
+# Pipenv artifacts
+Pipfile
+Pipfile.lock

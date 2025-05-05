@@ -18,3 +18,4 @@ venv/
 # Pipenv artifacts
 Pipfile
 Pipfile.lock
+andronatual.ipynb

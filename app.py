@@ -11,7 +11,6 @@ import numpy as np
 import streamlit as st
 import plotly.express as px
 from plotly import graph_objects as go
-from fpdf import FPDF
 import plotly.io as pio
 from scipy.stats import linregress
 from rapidfuzz import fuzz

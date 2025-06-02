@@ -226,51 +226,38 @@ if uploaded_file:
             st.subheader("📊 Average Score by Site")
             st.markdown("This visual shows the average audit score by site, allowing comparison and performance tracking.")
             st.toast("Filters applied successfully.", icon="✅")
-            
-            # Seletor de modo de visualização
+
+            # View mode selector
             mode = st.radio("View mode", ["Cumulative", "Monthly"], horizontal=True)
-        
+
             if mode == "Monthly":
                 meses = sorted(
-                    df_filtered['Month'].dropna().unique(),
+                    df_all['Month'].dropna().unique(),
                     key=lambda m: list(calendar.month_abbr).index(m)
                 )
                 sel_mes = st.selectbox("Select Month", meses)
-        
+
+            # Sidebar filters
             st.sidebar.header("Filters")
             with st.sidebar.expander("📅 Date Range"):
                 dmin, dmax = df_all['Date Completed'].min(), df_all['Date Completed'].max()
                 sel_date = st.date_input("Select Date Range", [dmin, dmax], min_value=dmin, max_value=dmax)
-            
-            # --- Filtro de Sites ---
+
             with st.sidebar.expander("Sites"):
                 site_options = sorted(df_all['Site_clean'].dropna().unique())
-            
                 if "selected_sites" not in st.session_state:
                     st.session_state.selected_sites = site_options
-            
-                # Botão de reset deve vir antes do multiselect para que o valor atualizado apareça imediatamente
                 if st.button("🔁 Reset Site Filter"):
                     st.session_state.selected_sites = site_options
                     st.rerun()
-            
-                sel_sites = st.multiselect(
-                    "Select Sites",
-                    options=site_options,
-                    default=st.session_state.selected_sites,
-                    key="site_filter"
-                )
-            
-            # --- Filtro de Evaluation ---
+                sel_sites = st.multiselect("Select Sites", options=site_options, default=st.session_state.selected_sites, key="site_filter")
+
             with st.sidebar.expander("Evaluation"):
-                sel_evals = st.multiselect("Select Evaluation", sorted(df_all['Evaluation'].unique()),
-                                           default=sorted(df_all['Evaluation'].unique()))
-            
-            # --- Filtro de Auditors ---
+                sel_evals = st.multiselect("Select Evaluation", sorted(df_all['Evaluation'].unique()), default=sorted(df_all['Evaluation'].unique()))
+
             with st.sidebar.expander("Auditors"):
-                sel_users = st.multiselect("Answered by", sorted(df_all['Answered by'].unique()),
-                                           default=sorted(df_all['Answered by'].unique()))
-        
+                sel_users = st.multiselect("Answered by", sorted(df_all['Answered by'].unique()), default=sorted(df_all['Answered by'].unique()))
+
             df_plot = df_all.copy()
             if mode == "Monthly":
                 df_plot = df_plot[df_plot['Month'] == sel_mes]
@@ -281,7 +268,7 @@ if uploaded_file:
                 df_plot['Evaluation'].isin(sel_evals) &
                 df_plot['Answered by'].isin(sel_users)
             ]
-        
+
             c1, c2, c3 = st.columns(3)
             if 'view' not in st.session_state:
                 st.session_state.view = 'all'
@@ -292,10 +279,10 @@ if uploaded_file:
             if c3.button("All Sites"):
                 st.session_state.view = 'all'
             view = st.session_state.view
-        
+
             max_n = df_plot['Site_clean'].nunique()
             n = st.slider("Number of Sites", min_value=5, max_value=max_n, value=10)
-        
+
             avg = df_plot.groupby('Site_clean')['Calculated Score'].mean()
             if view == 'top':
                 sel = avg.sort_values(ascending=False).head(n)
@@ -303,26 +290,23 @@ if uploaded_file:
                 sel = avg.sort_values(ascending=True).head(n)
             else:
                 sel = avg.sort_values(ascending=True)
-        
+
             df_bar = sel.reset_index().rename(columns={'Calculated Score': 'Score'})
             totv = df_plot.groupby('Site_clean')['Valid Questions'].sum()
             df_bar['Total_Valid_Questions'] = df_bar['Site_clean'].map(totv)
-            df_bar['Evaluation'] = df_bar.apply(
-                lambda r: 'Not Enough Data' if r['Total_Valid_Questions'] <= 5 else classify_score(r['Score']), axis=1)
-        
+            df_bar['Evaluation'] = df_bar.apply(lambda r: 'Not Enough Data' if r['Total_Valid_Questions'] <= 5 else classify_score(r['Score']), axis=1)
+
             g_app = df_bar[df_bar['Evaluation'] == 'Approved'].sort_values('Score', ascending=False)
             g_acc = df_bar[df_bar['Evaluation'] == 'Acceptable'].sort_values('Score', ascending=False)
             g_cri = df_bar[df_bar['Evaluation'] == 'Critical'].sort_values('Score', ascending=False)
             g_ne = df_bar[df_bar['Evaluation'] == 'Not Enough Data']
             df_bar = pd.concat([g_app, g_acc, g_cri, g_ne], ignore_index=True)
-        
-            cmap = {'Approved': '#2ecc71', 'Acceptable': '#f1c40f',
-                    'Critical': '#e74c3c', 'Not Enough Data': '#95a5a6'}
+
+            cmap = {'Approved': '#2ecc71', 'Acceptable': '#f1c40f', 'Critical': '#e74c3c', 'Not Enough Data': '#95a5a6'}
             site_order = df_bar['Site_clean'].tolist()
             eval_order = ['Approved', 'Acceptable', 'Critical', 'Not Enough Data']
-        
-            fig1 = px.bar(df_bar, x='Score', y='Site_clean', orientation='h',
-                          color='Evaluation', color_discrete_map=cmap,
+
+            fig1 = px.bar(df_bar, x='Score', y='Site_clean', orientation='h', color='Evaluation', color_discrete_map=cmap,
                           category_orders={'Site_clean': site_order, 'Evaluation': eval_order},
                           hover_data={'Score': ':.1f', 'Total_Valid_Questions': True})
             fig1.add_vline(x=80, line_dash='dash', line_color='green', annotation_text='Approved (80%)')
@@ -395,21 +379,24 @@ if uploaded_file:
         with tabs[2]:
             st.subheader("🧑‍💼 Auditor Overview")
             st.markdown("Explore the activity and performance of each auditor based on completed audits, scores, and site coverage.")
-        
             st.toast("Filters applied successfully.", icon="✅")
         
-            # Filtros laterais
-            with st.sidebar.expander("🧑 Select Auditor"):
-                selected_auditor = st.selectbox("Answered by", sorted(df_all['Answered by'].dropna().unique()), key="auditor_user")
+            # Filtros principais
+            st.markdown("#### 🔍 Select Filters")
+            col1, col2 = st.columns(2)
         
-            with st.sidebar.expander("📅 Month Filter"):
-                months = ["All"] + sorted(
+            with col1:
+                auditor_options = sorted(df_all['Answered by'].dropna().unique())
+                selected_auditor = st.selectbox("Answered by", auditor_options)
+        
+            with col2:
+                month_options = ["All"] + sorted(
                     df_all['Month'].dropna().unique(),
                     key=lambda m: list(calendar.month_abbr).index(m)
                 )
-                selected_month = st.selectbox("Select Month", months, key="auditor_month")
+                selected_month = st.selectbox("Select Month", month_options)
         
-            # Aplica filtros
+            # Aplicar filtros
             df_aud = df_all.copy()
             if selected_month != "All":
                 df_aud = df_aud[df_aud['Month'] == selected_month]
@@ -417,9 +404,9 @@ if uploaded_file:
         
             # KPI
             total_audits = len(df_aud)
-            st.markdown(f"### ✅ Total Audits Performed: {total_audits}")
+            st.markdown(f"### ✅ Total Audits: {total_audits}")
         
-            # Tabela de frequência
+            # Tabela por site
             st.markdown("#### 📋 Audit Count per Site")
             if selected_month == "All":
                 freq = df_aud.groupby(['Site_clean', 'Month']).size().reset_index(name='Count')
@@ -427,7 +414,7 @@ if uploaded_file:
                 freq = df_aud['Site_clean'].value_counts().rename_axis('Site_clean').reset_index(name='Count')
             st.dataframe(freq, use_container_width=True)
         
-            # Gráfico de barras horizontais
+            # Gráfico de frequência
             st.markdown("#### 📊 Audit Frequency by Site")
             df_counts = df_aud['Site_clean'].value_counts().reset_index()
             df_counts.columns = ['Site', 'Audit Count']

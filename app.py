@@ -15,17 +15,13 @@ import plotly.io as pio
 from scipy.stats import linregress
 from rapidfuzz import fuzz
 
-
 # Tratamento de erros
 import traceback
-
 
 # --- Funções auxiliares ---
 def normalize_name(s: str) -> str:
     s = str(s).lower().strip()
-    s = re.sub(r"(\d+)\s*-\s*(\d+)",
-               lambda m: str(max(int(m.group(1)),int(m.group(2)))),
-               s)
+    s = re.sub(r"(\d+)\s*-\s*(\d+)", lambda m: str(max(int(m.group(1)), int(m.group(2)))), s)
     s = re.sub(r"\bstreet\b", "st", s)
     s = re.sub(r"[^a-z0-9\s]", " ", s)
     return re.sub(r"\s+", " ", s).strip()
@@ -54,13 +50,29 @@ def classify_score(s):
 st.set_page_config(page_title="Cleaning Audit Dashboard", layout="wide")
 
 tabs = st.tabs([
-    "📘 Instructions & Upload",
-    "📊 Scores & Heatmap",
-    "🧑‍💼 Auditor Overview",
-    "📈 Executive Dashboard",
-    "📌 Monthly Highlights"
+    "📤 Upload",                  # 0
+    "📊 Scores & Heatmap",        # 1
+    "🧑‍💼 Auditor Overview",       # 2
+    "📈 Executive Dashboard",     # 3
+    "🧹 Faults Analysis",         # 4 
+    "📌 Monthly Highlights"       # 5 
 ])
 
+# --- Mapeamento de meses para ordenação consistente ---
+month_abbr_map = {month: abbr for month, abbr in zip(calendar.month_name[1:], calendar.month_abbr[1:])}
+month_order = list(calendar.month_abbr[1:])  # ["Jan", "Feb", ..., "Dec"]
+
+# --- Ordenar meses presentes no df_all['Month_sheet'] (evita erro do tipo 'January 25') ---
+if 'df_all' in locals():
+    def extract_abbr(month_str):
+        # Extrai "January" de "January 25", depois converte para "Jan"
+        full = str(month_str).split()[0]
+        return month_abbr_map.get(full, "Jan")
+
+    unique_months = sorted(
+        df_all["Month_sheet"].dropna().unique(),
+        key=lambda x: month_order.index(extract_abbr(x)) if extract_abbr(x) in month_order else -1
+    )
 # --- TAB 0: Upload ---
 with tabs[0]:
     st.title("🧼 Cleaning Audit Dashboard")
@@ -122,7 +134,19 @@ if uploaded_file:
         # Processa coluna de datas e mês
         df_all['Date Completed'] = pd.to_datetime(df_all['Date Completed'], errors='coerce')
         df_all['Month'] = df_all['Date Completed'].dt.strftime('%b')  # útil para os filtros mensais
+
+        # Adiciona coluna com o nome das abas (ex: "April 25")
+        month_list = []
+        for sh in xls.sheet_names:
+            df_temp = load_clean_sheet(uploaded_file, sh)
+            month_list.extend([sh] * len(df_temp))
         
+        df_all['Month_sheet'] = month_list
+
+        # Cria coluna auxiliar com mês abreviado para facilitar ordenação
+        df_all["Month_sheet_abbr"] = df_all["Month_sheet"].apply(
+            lambda x: month_abbr_map.get(str(x).split()[0], "Jan")
+        )
 
         # 🔄 Botão para resetar filtros 
         if st.sidebar.button("🔄 Reset Filters"):
@@ -221,6 +245,13 @@ if uploaded_file:
                       else classify_score(r['Calculated Score']),
             axis=1)
 
+        # Identifica colunas de auditoria (respostas binárias)
+        audit_cols = [col for col in df_all.columns 
+              if col.startswith("Have ") or 
+                 col.startswith("Has ") or 
+                 col.startswith("Is ") or 
+                 col.startswith("Are ")]
+
         # --- TAB 1: Scores & Heatmap ---
         with tabs[1]:
             st.subheader("📊 Average Score by Site")
@@ -232,8 +263,8 @@ if uploaded_file:
 
             if mode == "Monthly":
                 meses = sorted(
-                    df_all['Month'].dropna().unique(),
-                    key=lambda m: list(calendar.month_abbr).index(m)
+                df_all['Month'].dropna().unique(),
+                key=lambda m: month_order.index(str(m)[:3]) if str(m)[:3] in month_order else 100
                 )
                 sel_mes = st.selectbox("Select Month", meses)
 
@@ -391,8 +422,8 @@ if uploaded_file:
         
             with col2:
                 month_options = ["All"] + sorted(
-                    df_all['Month'].dropna().unique(),
-                    key=lambda m: list(calendar.month_abbr).index(m)
+                df_all['Month'].dropna().unique(),
+                key=lambda m: month_order.index(str(m)[:3]) if str(m)[:3] in month_order else 100
                 )
                 selected_month = st.selectbox("Select Month", month_options)
         
@@ -441,9 +472,9 @@ if uploaded_file:
         with tabs[3]:
             st.subheader("📈 Executive Dashboard")
             st.markdown("This section provides a high-level summary of audit activity and performance indicators across all sites.")
-        
+            
             st.toast("Executive metrics loaded successfully.", icon="✅")
-        
+            
             # Filter dataset
             df_filtered = df_all[
                 (df_all['Date Completed'] >= pd.to_datetime(sel_date[0])) &
@@ -452,7 +483,7 @@ if uploaded_file:
                 df_all['Evaluation'].isin(sel_evals) &
                 df_all['Answered by'].isin(sel_users)
             ]
-        
+            
             # KPIs
             k1, k2, k3 = st.columns(3)
             total_audits = len(df_filtered)
@@ -460,16 +491,16 @@ if uploaded_file:
             eval_dist = df_filtered['Evaluation'].value_counts().to_dict()
             approved = eval_dist.get("Approved", 0)
             percentage_approved = (approved / total_audits) * 100 if total_audits > 0 else 0
-        
+            
             with k1:
                 st.metric("Total Audits", f"{total_audits}")
             with k2:
                 st.metric("Unique Sites Audited", f"{total_sites}")
             with k3:
                 st.metric("Approved Audits (%)", f"{percentage_approved:.1f}%")
-        
+            
             st.markdown(f"**Selected Period:** {sel_date[0].strftime('%d %b %Y')} to {sel_date[1].strftime('%d %b %Y')}")
-        
+            
             # --- Summary ---
             st.markdown("### 🗒️ Audit Summary Overview")
             try:
@@ -478,7 +509,7 @@ if uploaded_file:
                 not_audited = all_sites - audited_sites
                 start_str = sel_date[0].strftime("%A, %d %B %Y")
                 end_str = sel_date[1].strftime("%A, %d %B %Y")
-        
+            
                 st.markdown(f"""
                 - **Selected Period:** {start_str} to {end_str}  
                 - **Total audits in selected period:** `{total_audits}`  
@@ -487,18 +518,18 @@ if uploaded_file:
                 """)
             except:
                 st.warning("⚠️ Could not generate audit summary.")
-        
+            
             # --- Evaluation Distribution ---
             st.markdown("### 📊 Evaluation Distribution")
             st.markdown("Count of audits per evaluation category (Approved, Acceptable, Critical).")
-        
+            
             eval_df = (
                 df_filtered['Evaluation']
                 .value_counts()
                 .rename_axis('Evaluation')
                 .reset_index(name='Count')
             )
-        
+            
             fig_eval = px.bar(
                 eval_df,
                 x='Count',
@@ -517,11 +548,11 @@ if uploaded_file:
             fig_eval.update_layout(height=300)
             fig_eval.update_traces(textposition='outside')
             st.plotly_chart(fig_eval, use_container_width=True)
-        
+            
             # --- Top 5 Most Audited Sites ---
             st.markdown("### 🏢 Top 5 Most Audited Sites")
             st.markdown("Bar chart of the five buildings with the most audits during the selected period.")
-        
+            
             top5_sites = (
                 df_filtered['Site_clean']
                 .value_counts()
@@ -529,7 +560,7 @@ if uploaded_file:
                 .reset_index(name='Audit Count')
                 .rename(columns={'index': 'Site_clean'})
             )
-        
+            
             fig_top5 = px.bar(
                 top5_sites,
                 x='Audit Count',
@@ -546,29 +577,29 @@ if uploaded_file:
             )
             fig_top5.update_traces(marker_color='#3498db', textposition='outside')
             st.plotly_chart(fig_top5, use_container_width=True)
-        
+            
             # --- Monthly Evaluation Distribution ---
             st.markdown("### 📅 Monthly Evaluation Distribution")
             st.markdown("Stacked bar chart showing percentage of each evaluation by month.")
-        
+            
             valid_eval = ['Approved', 'Acceptable', 'Critical']
             df_all['Month'] = pd.to_datetime(df_all['Date Completed']).dt.strftime('%b')
             df_eval = df_all[df_all['Evaluation'].isin(valid_eval)].copy()
-        
+            
             monthly_eval = (
                 df_eval.groupby(['Month', 'Evaluation'])
                 .size()
                 .reset_index(name='Count')
             )
-        
+            
             total_by_month = monthly_eval.groupby('Month')['Count'].sum().reset_index(name='Total')
             monthly_eval = monthly_eval.merge(total_by_month, on='Month')
             monthly_eval['Percentage'] = 100 * monthly_eval['Count'] / monthly_eval['Total']
-        
+            
             month_order = [m for m in calendar.month_abbr[1:] if m in monthly_eval['Month'].unique()]
             monthly_eval['Month'] = pd.Categorical(monthly_eval['Month'], categories=month_order, ordered=True)
             monthly_eval = monthly_eval.sort_values('Month')
-        
+            
             fig_monthly = px.bar(
                 monthly_eval,
                 x='Percentage',
@@ -598,26 +629,26 @@ if uploaded_file:
                 marker_line_width=0
             )
             st.plotly_chart(fig_monthly, use_container_width=True)
-        
+            
             # --- Building Performance Over Time ---
             st.markdown("### 🏢 Building Performance Over Time")
             st.markdown("Scatter plot of average audit scores per site over the months.")
-        
+            
             try:
                 df_valid = df_filtered[df_filtered['Valid Questions'] > 5].copy()
                 df_valid['Month'] = pd.to_datetime(df_valid['Date Completed'], errors='coerce').dt.strftime('%b')
                 df_valid = df_valid[df_valid['Month'].notna()]
-        
+            
                 df_scatter = (
                     df_valid.groupby(['Site_clean', 'Month'])['Calculated Score']
                     .mean()
                     .reset_index()
                 )
-        
+            
                 month_order = list(calendar.month_abbr[1:])
                 df_scatter['Month'] = pd.Categorical(df_scatter['Month'], categories=month_order, ordered=True)
                 df_scatter = df_scatter.sort_values(['Month', 'Site_clean'])
-        
+            
                 fig_scatter = px.scatter(
                     df_scatter,
                     x='Month',
@@ -633,7 +664,7 @@ if uploaded_file:
                     height=500,
                     category_orders={'Month': month_order}
                 )
-        
+            
                 fig_scatter.add_hline(
                     y=80, line_dash='dash', line_color='green',
                     annotation_text='Approved (80%)', annotation_position='top left'
@@ -642,7 +673,7 @@ if uploaded_file:
                     y=70, line_dash='dash', line_color='orange',
                     annotation_text='Acceptable (70%)', annotation_position='bottom left'
                 )
-        
+            
                 fig_scatter.update_layout(
                     xaxis_title='Month',
                     yaxis_title='Calculated Score',
@@ -650,17 +681,226 @@ if uploaded_file:
                     legend_title='Site',
                     margin=dict(l=60, r=40, t=60, b=40)
                 )
-        
+            
                 st.plotly_chart(fig_scatter, use_container_width=True)
-        
+            
             except Exception as e:
                 st.error("⚠️ Failed to generate the scatter plot.")
                 st.text(traceback.format_exc())
-
             
-
-        # --- TAB 4: Monthly Highlights ---
+        # --- TAB 4: Faults Analysis ---
         with tabs[4]:
+            st.subheader("🧹 Faults Analysis")
+        
+            st.markdown("## 📊 Top 10 Sites by Type of Cleaning Faults")
+            st.markdown("""
+            This stacked bar chart highlights the ten sites with the highest number of cleaning failures.  
+            Each bar is broken down by audit question (type of failure), enabling quick identification of recurring issues across different locations.
+            """)
+        
+            view_selector = st.radio("View 10:", ["Cumulative", "Monthly"], horizontal=True, key="top10_view")
+        
+            # Detecta colunas de auditoria
+            audit_cols = [col for col in df_all.columns if col.startswith(("Have ", "Has ", "Is ", "Are "))]
+        
+            # Filtro por mês (Monthly ou Cumulative)
+            def extract_abbr(month_str):
+                try:
+                    full = str(month_str).split()[0]
+                    return month_abbr_map.get(full, "Jan")
+                except:
+                    return "Jan"
+        
+            if view_selector == "Monthly":
+                unique_months = sorted(
+                    df_all["Month_sheet"].dropna().unique(),
+                    key=lambda x: month_order.index(extract_abbr(x)) if extract_abbr(x) in month_order else 100
+                )
+                selected_month_top10 = st.selectbox("Select a Month", unique_months, key="selectbox_month_top10")
+                filtered_df_top10 = df_all[df_all["Month_sheet"] == selected_month_top10]
+            else:
+                filtered_df_top10 = df_all.copy()
+        
+            # 🔍 Aplica o filtro correto
+            filtered_df_top10 = filtered_df_top10[filtered_df_top10[audit_cols].notna().any(axis=1)]
+        
+            # Matriz de falhas
+            fault_matrix = (filtered_df_top10[audit_cols] == 0).groupby(filtered_df_top10['Site']).sum().astype(int)
+            fault_matrix["Total Faults"] = fault_matrix.sum(axis=1)
+        
+            top10_sites = fault_matrix[fault_matrix["Total Faults"] > 0].sort_values("Total Faults", ascending=False).head(10)
+        
+            # Prepara dados para gráfico
+            melted_top10 = (
+                top10_sites.drop(columns="Total Faults")
+                .reset_index()
+                .melt(id_vars="Site", var_name="Audit Question", value_name="Failures")
+            )
+            melted_top10 = melted_top10[melted_top10["Failures"] > 0]
+        
+            # 📌 Exibe tabela de debug opcional
+            st.checkbox("✅ Matriz top10", value=True, key="chk_matriz_top10")
+            if st.session_state.chk_matriz_top10:
+                st.dataframe(melted_top10, use_container_width=True)
+        
+            # Gráfico principal
+            label_top10 = "Cumulative" if view_selector == "Cumulative" else selected_month_top10
+            fig_top10 = px.bar(
+                melted_top10,
+                x="Failures",
+                y="Site",
+                color="Audit Question",
+                orientation="h",
+                text="Failures",
+                title=f"Top 10 Sites by Cleaning Faults – {label_top10}",
+                height=600
+            )
+            fig_top10.update_layout(
+                yaxis_title="Site",
+                xaxis_title="Total Number of Faults",
+                barmode="stack",
+                legend_title="Audit Question",
+                margin=dict(l=60, r=60, t=60, b=60),
+                font=dict(size=13)
+            )
+            fig_top10.update_traces(textposition="inside")
+            st.plotly_chart(fig_top10, use_container_width=True)
+        
+            # --- Detalhamento por site + mês ---
+            st.markdown("---")
+            st.markdown("## 🔍 Failures for Selected Site and Month")
+            st.markdown("Detailed view of which audit questions failed the most for a specific site and month.")
+        
+            col1, col2 = st.columns(2)
+            with col1:
+                selected_site = st.selectbox("Select a Site", sorted(df_all['Site'].dropna().unique()), key="site_single")
+            with col2:
+                unique_months = sorted(
+                    df_all["Month_sheet"].dropna().unique(),
+                    key=lambda x: month_order.index(extract_abbr(x)) if extract_abbr(x) in month_order else 100
+                )
+                selected_month = st.selectbox("Select a Month", unique_months, key="month_single")
+        
+            df_filtered = df_all[
+                (df_all["Site"] == selected_site) &
+                (df_all["Month_sheet"] == selected_month)
+            ]
+            df_filtered = df_filtered[df_filtered[audit_cols].notna().any(axis=1)]
+        
+            if df_filtered.empty:
+                st.warning("No data available for this selection.")
+            else:
+                fault_counts_df = (
+                    (df_filtered[audit_cols] == 0)
+                    .sum()
+                    .sort_values(ascending=False)
+                    .reset_index()
+                )
+                fault_counts_df.columns = ["Audit Question", "Failure Count"]
+                fault_counts_df = fault_counts_df[fault_counts_df["Failure Count"] > 0]
+        
+                if fault_counts_df.empty:
+                    st.info("No failures recorded for this site and month.")
+                else:
+                    st.markdown(f"### Most Common Failures – **{selected_site}** in **{selected_month}**")
+                    fig = px.bar(
+                        fault_counts_df,
+                        x="Failure Count",
+                        y="Audit Question",
+                        orientation="h",
+                        text="Failure Count",
+                        labels={"Audit Question": "Audit Question", "Failure Count": "Number of Failures"},
+                        color="Audit Question"
+                    )
+                    fig.update_layout(
+                        yaxis=dict(autorange="reversed"),
+                        height=500,
+                        margin=dict(l=80, r=40, t=60, b=60),
+                        showlegend=False
+                    )
+                    fig.update_traces(textposition="outside")
+                    st.plotly_chart(fig, use_container_width=True)
+
+                # --- Tendência dos 5 Principais Problemas de Limpeza ao Longo do Tempo ---
+            st.markdown("---")
+            st.markdown("## 📈 Top 5 Cleaning Faults Over Time")
+            st.markdown("This line chart shows how the five most frequent cleaning issues evolved month by month.")
+
+            # Garantir ordenação dos meses
+            month_order = ["January 25", "February 25", "March 25", "April 25", "May 25"]
+            df_all["Month_sheet"] = pd.Categorical(df_all["Month_sheet"], categories=month_order, ordered=True)
+
+            fault_trends = (df_all[audit_cols] == 0).groupby(df_all["Month_sheet"], observed=False).sum().T
+
+            # Top 5 perguntas com mais falhas no total
+            top5_questions = fault_trends.sum(axis=1).sort_values(ascending=False).head(5).index.tolist()
+            fault_trends_top5 = fault_trends.loc[top5_questions]
+
+            # Converter para formato long
+            fault_trends_top5 = fault_trends_top5.reset_index().melt(
+                id_vars="index", var_name="Month", value_name="Failures"
+            )
+            fault_trends_top5.columns = ["Audit Question", "Month", "Failures"]
+
+            fig_top5_trend = px.line(
+                fault_trends_top5,
+                x="Month",
+                y="Failures",
+                color="Audit Question",
+                markers=True,
+                title="Top 5 Cleaning Faults Over Time (Ordered by Month)"
+            )
+
+            fig_top5_trend.update_layout(
+                xaxis_title="Month",
+                yaxis_title="Number of Failures",
+                legend_title="Audit Question",
+                height=600,
+                margin=dict(l=40, r=40, t=60, b=40)
+            )
+
+            st.plotly_chart(fig_top5_trend, use_container_width=True)
+            
+            # --- Top 5 Most Common Cleaning Faults ---
+            st.markdown("---")
+            st.markdown("## 🔝 Top 5 Most Common Cleaning Faults")
+            st.markdown("""
+            This horizontal bar chart highlights the five audit questions that failed most frequently across all inspections,  
+            helping to identify systemic weaknesses in cleaning performance.
+            """)
+
+            fault_counts_overall = (
+                (df_all[audit_cols] == 0)
+                .sum()
+                .sort_values(ascending=False)
+                .reset_index()
+            )
+            fault_counts_overall.columns = ["Audit Question", "Failure Count"]
+            fault_counts_overall = fault_counts_overall.head(5)
+
+            fig_top5_faults = px.bar(
+                fault_counts_overall,
+                x="Failure Count",
+                y="Audit Question",
+                orientation="h",
+                text="Failure Count",
+                labels={"Audit Question": "Audit Question", "Failure Count": "Number of Failures"},
+                color="Audit Question"
+            )
+
+            fig_top5_faults.update_traces(textposition="outside")
+            fig_top5_faults.update_layout(
+                yaxis=dict(categoryorder="total ascending"),
+                height=500,
+                margin=dict(l=40, r=40, t=60, b=40),
+                showlegend=False
+            )
+
+            st.plotly_chart(fig_top5_faults, use_container_width=True)
+                
+
+        # --- TAB 5: Monthly Highlights ---
+        with tabs[5]:
             st.subheader("📌 Monthly Highlights")
             st.markdown("This section showcases the top and bottom performing sites for each month based on audit scores.")
             st.toast("Monthly highlights loaded successfully.", icon="✅")
@@ -712,7 +952,7 @@ if uploaded_file:
                         )
                         fig_bot.update_traces(marker=dict(size=12), textposition='middle right')
                         fig_bot.update_layout(
-                            xaxis_range=[60, 102],
+                            xaxis_range=[40, 102],
                             height=400,
                             margin=dict(l=80, r=40, t=50, b=40)
                         )

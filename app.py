@@ -773,7 +773,7 @@ if uploaded_file:
         
             col1, col2 = st.columns(2)
             with col1:
-                selected_site = st.selectbox("Select a Site", sorted(df_all['Site'].dropna().unique()), key="site_single")
+                selected_site = st.selectbox("Select a Site", sorted(df_all['Site_clean'].dropna().unique()), key="site_single")
             with col2:
                 unique_months = sorted(
                     df_all["Month_sheet"].dropna().unique(),
@@ -782,7 +782,7 @@ if uploaded_file:
                 selected_month = st.selectbox("Select a Month", unique_months, key="month_single")
         
             df_filtered = df_all[
-                (df_all["Site"] == selected_site) &
+                (df_all["Site_clean"] == selected_site) &
                 (df_all["Month_sheet"] == selected_month)
             ]
             df_filtered = df_filtered[df_filtered[audit_cols].notna().any(axis=1)]

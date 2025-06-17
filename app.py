@@ -934,7 +934,7 @@ if uploaded_file:
                         )
                         fig_top.update_traces(marker=dict(size=12), textposition='middle right')
                         fig_top.update_layout(
-                            xaxis_range=[60, 104],
+                            xaxis_range=[60, 108],
                             height=400,
                             margin=dict(l=80, r=40, t=50, b=40)
                         )

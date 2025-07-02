@@ -111,24 +111,18 @@ if uploaded_file:
         @st.cache_data
         def load_clean_sheet(file, sheet_name):
             df = pd.read_excel(file, sheet_name=sheet_name)
-        
-            # ✅ Padronizar os nomes das colunas
-            df.columns = (
-                df.columns.astype(str)
-                         .str.strip()
-                         .str.lower()
-                         .str.replace(r"\s+", " ", regex=True)
-            )
-        
-            # ✅ Conjunto esperado de colunas (em minúsculas)
-            esperado = {"date completed", "site", "answered by",
-                        "percentage received", "score",
-                        "questionnaire result", "yes", "no", "n/a"}
-            
+            df.columns = (df.columns
+                            .str.strip()
+                            .str.replace(r"\s+"," ",regex=True)
+                            .str.replace("Questionarie Result",
+                                         "Questionnaire Result",
+                                         regex=False))
+            esperado = {"Date Completed","Site","Answered by",
+                        "Percentage Received","Score",
+                        "Questionnaire Result","Yes","No","N/A"}
             faltam = esperado - set(df.columns)
             if faltam:
-                raise ValueError(f"Missing columns in '{sheet_name}': {faltam}")
-            
+                raise ValueError(f"Missing columns em '{sheet_name}': {faltam}")
             return df
 
         # 1) carrega tudo
@@ -287,7 +281,17 @@ if uploaded_file:
                 if st.button("🔁 Reset Site Filter"):
                     st.session_state.selected_sites = site_options
                     st.rerun()
-                sel_sites = st.multiselect("Select Sites", options=site_options, default=st.session_state.selected_sites, key="site_filter")
+            
+                # Ajuste de proteção para evitar erro do multiselect
+                default_sites = [
+                    s for s in st.session_state.selected_sites if s in site_options
+                ]
+                sel_sites = st.multiselect(
+                    "Select Sites",
+                    options=site_options,
+                    default=default_sites,
+                    key="site_filter"
+                )
 
             with st.sidebar.expander("Evaluation"):
                 sel_evals = st.multiselect("Select Evaluation", sorted(df_all['Evaluation'].unique()), default=sorted(df_all['Evaluation'].unique()))
@@ -833,7 +837,11 @@ if uploaded_file:
             st.markdown("This line chart shows how the five most frequent cleaning issues evolved month by month.")
 
             # Garantir ordenação dos meses
-            month_order = ["January 25", "February 25", "March 25", "April 25", "May 25"]
+            month_order = sorted(
+                df_all["Month_sheet"].dropna().unique(),
+                key=lambda x: (int(x.split()[1]), list(calendar.month_name).index(x.split()[0]))
+                if len(x.split()) == 2 and x.split()[0] in list(calendar.month_name) else 100
+            )
             df_all["Month_sheet"] = pd.Categorical(df_all["Month_sheet"], categories=month_order, ordered=True)
 
             fault_trends = (df_all[audit_cols] == 0).groupby(df_all["Month_sheet"], observed=False).sum().T

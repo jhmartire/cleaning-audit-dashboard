@@ -111,18 +111,24 @@ if uploaded_file:
         @st.cache_data
         def load_clean_sheet(file, sheet_name):
             df = pd.read_excel(file, sheet_name=sheet_name)
-            df.columns = (df.columns
-                            .str.strip()
-                            .str.replace(r"\s+"," ",regex=True)
-                            .str.replace("Questionarie Result",
-                                         "Questionnaire Result",
-                                         regex=False))
-            esperado = {"Date Completed","Site","Answered by",
-                        "Percentage Received","Score",
-                        "Questionnaire Result","Yes","No","N/A"}
+        
+            # ✅ Padronizar os nomes das colunas
+            df.columns = (
+                df.columns.astype(str)
+                         .str.strip()
+                         .str.lower()
+                         .str.replace(r"\s+", " ", regex=True)
+            )
+        
+            # ✅ Conjunto esperado de colunas (em minúsculas)
+            esperado = {"date completed", "site", "answered by",
+                        "percentage received", "score",
+                        "questionnaire result", "yes", "no", "n/a"}
+            
             faltam = esperado - set(df.columns)
             if faltam:
-                raise ValueError(f"Missing columns em '{sheet_name}': {faltam}")
+                raise ValueError(f"Missing columns in '{sheet_name}': {faltam}")
+            
             return df
 
         # 1) carrega tudo
